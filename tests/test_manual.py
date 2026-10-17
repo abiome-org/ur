@@ -112,6 +112,7 @@ def test_hand_driven_round(tmp_path, ur):
     assert "breaks a guard: params <= 20" in out
     assert "Start one fresh session with `ur prompt r1-c` as its prompt" in out
     prompt = ur("prompt", "r1-c", cwd=project).stdout
+    assert "Candidates must meet these limits on held-out, or they're rejected: `params <= 20`." in prompt
     order = prompt.split("best first: ")[1].split(".\n")[0].split(", ")
     assert order == [w2_node, ws_meta(tmp_path, "r1-w1")["head"]]  # the guard-breaker isn't offered
 

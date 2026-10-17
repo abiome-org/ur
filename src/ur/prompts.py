@@ -78,18 +78,28 @@ def worker(brief: str, path: Path, deadline: float) -> str:
         f"{brief.rstrip()}\n\n---\n\n{_where(path)}\n"
         f"The round ends at {clock(deadline)}, {human_duration(deadline - now())} from now. "
         "A run only starts if it can finish before then.\n"
-        "Use the whole round: when an idea works, commit it and try the next.\n"
+        "Don't stop after one idea. Keep trying ideas until the round ends: when one works, commit it and try "
+        "the next. `ur run` tells you when there's no time left for another run.\n"
         "`ur status` shows your time left and your scores. `ur --help` and the ur skill list every command.\n"
     )
 
 
-def construct(path: Path, base: str, nodes: list[str], max_candidates: int, deadline: float) -> str:
+def construct(
+    path: Path, base: str, nodes: list[str], max_candidates: int, deadline: float, guards: list[str]
+) -> str:
+    limits = (
+        "\nCandidates must meet these limits on held-out, or they're rejected: "
+        + "; ".join(f"`{g}`" for g in guards)
+        + ".\n"
+        if guards
+        else ""
+    )
     return f"""Your job: combine the best changes from this round into candidate models.
 
 {_where(path)}
 
 It holds the current base, {base}. These workers beat the base on the held-out benchmark, best first: {", ".join(nodes)}.
-
+{limits}
 - `ur diff base <node>` shows a worker's changes.
 - `ur apply <node>` merges a worker's changes into your workspace. Conflicts get markers for you to resolve.
 - `ur reset base` puts your workspace back to the base.

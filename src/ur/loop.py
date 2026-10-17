@@ -462,7 +462,11 @@ def close_cmd(c: Campaign) -> int:
         ws["max_candidates"] = cfg.round.max_candidates
         store.save_ws(ws)
         _write_prompt(
-            c, construct, prompts.construct(store.ws_path(construct), base["id"], top, cfg.round.max_candidates, construct_deadline)
+            c,
+            construct,
+            prompts.construct(
+                store.ws_path(construct), base["id"], top, cfg.round.max_candidates, construct_deadline, cfg.objective.guards
+            ),
         )
     with c.update_state() as s:
         rnd = s["rounds"][-1]
