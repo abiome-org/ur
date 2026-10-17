@@ -34,14 +34,8 @@ def score_dir(c: "Campaign", workdir: Path, split: str, devices: list[str], log:
     out = out_dir / "metrics.json"
     try:
         cmd = fill(c.cfg.eval.command, eval_dir=c.eval_dir, workspace=workdir, data=data, split=split, out=out)
-        env = c.env(
-            devices,
-            UR_SPLIT=split,
-            UR_DATA=data,
-            UR_OUT=out,
-            UR_WORKSPACE=workdir,
-            UR_EVAL_DIR=c.eval_dir,
-        )
+        # Nothing about the split goes in the environment: code the scorer imports can read that.
+        env = c.env(devices)
         status, code, _ = execute.run_logged(cmd, workdir, env, c.cfg.eval.timeout, log, c.cfg.exec.wrap)
         if status == "timeout":
             raise EvalFailed(f"the scorer ran past eval.timeout ({c.cfg.eval.timeout:g}s)", log)

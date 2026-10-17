@@ -1,9 +1,11 @@
 # Toy project
 
-A regression problem small enough to train in a second on a CPU, for trying ur end to end. The model is linear over the features in `model.py`, trained by minibatch gradient descent until its time budget runs out. The data is `y = 1.5x² − x + 0.3·sin(4x) + noise`, so there's a lot to gain from better features.
+A regression problem small enough to train in a second on a CPU, for trying ur end to end. The model is linear over the features in `model.py`, trained by minibatch gradient descent until its time budget runs out. The data is one noisy function of `x` on [-1, 1], and the starting features fit it badly.
+
+Its data comes from a generator kept outside this directory, so workers can't read how it was made:
 
 ```sh
-python3 make_data.py --private /tmp/toy-private   # train and dev in data/, held-out and final outside the project
+python3 ../toy-data/make_data.py --project . --private /tmp/toy-private
 ```
 
-Then tell your agent: *"I'd like to initialize ur for this project."* The held-out and final files are in `/tmp/toy-private`, `train.py --budget {budget} --init {init}` trains, and the checkpoint is `ckpt/weights.json`.
+That writes train and dev into `data/`, and held-out and final into `/tmp/toy-private`. Then tell your agent: *"I'd like to initialize ur for this project."* `train.py --budget {budget} --init {init}` trains, and the checkpoint is `ckpt/weights.json`.

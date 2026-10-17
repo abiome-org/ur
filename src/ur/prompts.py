@@ -78,6 +78,7 @@ def worker(brief: str, path: Path, deadline: float) -> str:
         f"{brief.rstrip()}\n\n---\n\n{_where(path)}\n"
         f"The round ends at {clock(deadline)}, {human_duration(deadline - now())} from now. "
         "A run only starts if it can finish before then.\n"
+        "Use the whole round: when an idea works, commit it and try the next.\n"
         "`ur status` shows your time left and your scores. `ur --help` and the ur skill list every command.\n"
     )
 

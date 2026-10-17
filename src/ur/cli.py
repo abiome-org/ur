@@ -165,15 +165,39 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+WORKSPACE_ONLY = {"run", "commit", "reset", "apply"}
+EITHER = {"status", "diff", "log"}
+
+
+def _isolate(cmd: str, started_in: tuple[Path, dict] | None) -> None:
+    """Keep workspace sessions to their own workspace's commands."""
+    if cmd == "install":
+        return
+    session = os.environ.get("UR_SESSION")
+    here = find_workspace(Path.cwd())
+    if cmd not in WORKSPACE_ONLY and not (cmd in EITHER and here):
+        if session or started_in:
+            raise UrError("Campaign commands aren't available from a workspace. Use them from the project.")
+    if session and here and here[1].get("id") != session:
+        raise UrError(f"This session works in workspace {session}, not {here[1].get('id')}.")
+    if started_in and here and here[1].get("id") != started_in[1].get("id"):
+        raise UrError("ur -C can't move from one workspace to another.")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        try:
+            started_in = find_workspace(Path.cwd())
+        except FileNotFoundError:
+            raise UrError("The current directory no longer exists; its round may have ended.") from None
         if args.chdir:
             os.chdir(args.chdir)
         if not args.cmd:
             parser.print_help()
             return 0
+        _isolate(args.cmd, started_in)
         return COMMANDS[args.cmd](args) or 0
     except UrError as e:
         print(f"ur: {e}", file=sys.stderr)

@@ -59,6 +59,13 @@ def _waiting(c: Campaign, s: dict[str, Any], ph: str) -> tuple[bool, str] | None
         if now() >= rnd["deadline"]:
             return True, "the round's deadline has passed. Next: `ur close`."
         if command and _sessions_done(c, rnd["workers"]):
+            died = _died(c, rnd["workers"])
+            if died:
+                return True, (
+                    f"every worker session has ended, and {len(died)} died: {', '.join(died)} (logs in "
+                    f"{c.store.root / 'sessions'}). Next: restart them with `ur spawn <workspace>` if there's time, "
+                    "or `ur close`."
+                )
             return True, "every worker session has ended. Next: `ur close`."
         step = f"wait for the deadline ({clock(rnd['deadline'])}) or for every worker to finish (`ur wait`), then `ur close`."
         died = _died(c, rnd["workers"]) if command else []
@@ -184,9 +191,15 @@ def project_status(c: Campaign, as_json: bool) -> int:
         st = c.cfg.stop
         budget = f"{s['gpu_hours']:.2f}" + (f" of {st.max_gpu_hours:g}" if st.max_gpu_hours else "")
         stalls = f"{s['stalls']} round{'s' if s['stalls'] != 1 else ''} without a new base"
+        limits = []
         if st.patience:
-            stalls += f" (stops at {st.patience})"
-        lines.append(f"{budget} GPU-hours used; {stalls}.")
+            limits.append(f"{st.patience} without a new base")
+        if st.max_rounds:
+            limits.append(f"{st.max_rounds} round{'s' if st.max_rounds != 1 else ''}")
+        if st.max_gpu_hours:
+            limits.append(f"{st.max_gpu_hours:g} GPU-hours")
+        stops = f" Stops at {' or '.join(limits)}." if limits else ""
+        lines.append(f"{budget} GPU-hours used; {stalls}.{stops}")
         info["gpu_hours"], info["stalls"] = s["gpu_hours"], s["stalls"]
 
     lines.append(f"Next: {info['next']}")

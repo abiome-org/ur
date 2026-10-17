@@ -66,7 +66,8 @@ def construct(prompt):
 
 def worker(name):
     if not name.startswith("r1-"):
-        return  # later rounds: find nothing, so the campaign stalls and stops
+        ur("run")  # later rounds: try something, find nothing, so the campaign stalls and stops
+        return
     if name.endswith("w1"):
         add_line(X2)
         ur("run")

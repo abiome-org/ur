@@ -45,7 +45,8 @@ def make_toy(tmp: Path, ur: Ur, extra_env: dict | None = None) -> dict:
     project = tmp / "toy"
     shutil.copytree(REPO / "examples" / "toy", project)
     private = tmp / "private"
-    subprocess.run([sys.executable, "make_data.py", "--private", str(private)], cwd=project, check=True)
+    make_data = REPO / "examples" / "toy-data" / "make_data.py"
+    subprocess.run([sys.executable, str(make_data), "--project", str(project), "--private", str(private)], check=True)
     ur_dir = project / ".ur"
     ur_dir.mkdir()
     shutil.copytree(FIXTURES / "toy" / "eval", ur_dir / "eval")

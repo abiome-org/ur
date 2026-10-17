@@ -108,11 +108,12 @@ def test_hand_driven_round(tmp_path, ur):
     assert status["head"]["node"] == ws_meta(tmp_path, "r1-w3")["head"]
 
     out = ur("close", cwd=project).stdout
-    assert out.count("beats the base") == 3
+    assert out.count("beats the base") == 2
+    assert "breaks a guard: params <= 20" in out
     assert "Start one fresh session with `ur prompt r1-c` as its prompt" in out
     prompt = ur("prompt", "r1-c", cwd=project).stdout
     order = prompt.split("best first: ")[1].split(".\n")[0].split(", ")
-    assert order[1] == w2_node
+    assert order == [w2_node, ws_meta(tmp_path, "r1-w1")["head"]]  # the guard-breaker isn't offered
 
     c = store / "r1-c"
     out = ur("apply", w2_node, cwd=c).stdout
@@ -134,6 +135,20 @@ def test_hand_driven_round(tmp_path, ur):
     assert len(rnd["rescore"]) == 2
     assert rnd["selected"] == w2_node  # its second run scored higher than the combination's
     assert json.loads(ur("status", "--json", cwd=project).stdout)["phase"] == "idle"
+
+    # Stored checkpoints are read-only, even through a workspace's links.
+    ckpt = tmp_path / "store" / "runs" / rnd["selected"] / "artifacts" / "ckpt" / "score.txt"
+    assert not ckpt.stat().st_mode & 0o222
+
+    # Rounds where no worker runs anything don't count as stalls; two in a row stop the campaign.
+    for n in (2, 3):
+        ur("round", cwd=project)
+        ur("close", cwd=project)
+        out = ur("select", cwd=project).stdout
+        assert "No worker ran anything this round" in out
+    s = json.loads((project / ".ur" / "state" / "campaign.json").read_text())
+    assert s["stalls"] == 0 and s["phase"] == "stopped"
+    assert "no worker ran anything in 2 rounds" in s["stopped_reason"]
 
     out = ur("archive", cwd=project).stdout
     assert "Archived the campaign" in out

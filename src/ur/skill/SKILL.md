@@ -21,12 +21,12 @@ Otherwise, run `ur status`. It reports the campaign's phase and the next step. A
    - How much compute, and when to stop.
    - What's off-limits: external data, pretrained weights, network access, files workers must not touch.
    - How to start fresh agent sessions here. Offer what this environment supports: subagents of this session (simplest, but the campaign stops when this session ends), a command that starts a headless session, or an orchestration tool. For a command, get the exact template. Also ask whether anything can re-run `continue` on a schedule, so the campaign outlives this session.
-3. Build the splits: train, dev, held-out, final. Put held-out and final outside the project, where worker processes can't read them.
+3. Build the splits: train, dev, held-out, final. Put held-out and final outside the project, where worker processes can't read them. Workers get a copy of the project, so check what it reveals: docs or scripts that state the answer (how the data was generated, reference solutions) go outside the project or into `workspace.exclude`.
 4. Write the scorer in `.ur/eval/` and finish `.ur/config.toml`. The scorer runs in a disposable copy of a candidate's workspace and writes a JSON object of metrics. Add `[[check.expect]]` entries: a trivial predictor should score at chance, and the reference answers, where they exist, should score perfectly.
 5. Run `ur check`. It runs the baseline several times (recording noise and cost per run), scores the expect entries, and checks the splits for overlap. Use the measured cost per run to set the per-run budget, round length and worker count, and confirm them with the user. Then `ur check` prepares a cheat probe: start one fresh session with `ur prompt probe` as its prompt (in command mode ur starts it), and when it finishes (`ur wait`), run `ur check --probe`. If the probe found a hole, look at what it did with `ur diff`, close the hole with the user, and run `ur check` again. If its gain is a legitimate improvement, `ur check --probe --accept`.
 6. Write `.ur/brief.md` last. `ur brief --draft` prints one built from the config; edit it if needed. Facts only:
    - the dev metric, and that held-out scores are hidden
-   - the per-run budget and the round deadline
+   - the per-run budget (ur adds each round's deadline to the prompt, since round length can change)
    - editable paths and what's off-limits
    - the loop: edit, `ur run`, then `ur commit` to keep or `ur reset` to revert
    - only the last commit counts, and only code, checkpoints and metrics survive the round, so notes are wasted

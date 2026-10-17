@@ -208,7 +208,9 @@ class Store:
         with locked(self.root / "lock"):
             path = self.root / "counter"
             n = int(path.read_text()) + 1 if path.exists() else 1
-            path.write_text(f"{n}\n")
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(f"{n}\n")
+            os.replace(tmp, path)
         return f"n{n}"
 
     def load_node(self, nid: str) -> dict[str, Any]:

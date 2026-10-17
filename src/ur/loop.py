@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import shutil
 import statistics
@@ -14,8 +15,19 @@ from typing import Any
 from . import config as config_mod
 from . import evaluate, execute, guards, prompts
 from .campaign import Campaign
-from .util import UrError, clock, fill, fmt_num, human_duration, now, sha256_file
-from .workspace import do_run
+from .util import UrError, clock, fill, fmt_num, force_rmtree, human_duration, make_writable, now, sha256_file
+from .workspace import clear_stale_run, do_run
+
+
+def _exclusive(fn):
+    """Commands that move the campaign between phases run one at a time."""
+
+    @functools.wraps(fn)
+    def wrapper(c: Campaign, *args: Any, **kwargs: Any) -> int:
+        with c.exclusive():
+            return fn(c, *args, **kwargs)
+
+    return wrapper
 
 
 # Setup.
@@ -48,8 +60,13 @@ def _stop_ws(c: Campaign, wid: str) -> None:
     active = ws.get("active")
     if execute.alive(active):
         execute.stop(active)
-        if execute.alive(active) and active.get("train_pgid"):
-            execute.kill_group(active["train_pgid"])
+    if active and execute.alive(active.get("train")):
+        execute.kill_group(active["train"]["pid"])
+    if active:
+        with store.ws_lock(wid):
+            ws = store.load_ws(wid)
+            clear_stale_run(c, ws)
+            store.save_ws(ws)
 
 
 def _spawn(c: Campaign, wid: str) -> dict[str, Any]:
@@ -62,7 +79,8 @@ def _spawn(c: Campaign, wid: str) -> dict[str, Any]:
             raise UrError(f"A session is already running in {wid} (pid {ws['session']['pid']}).")
         path, prompt_file = store.ws_path(wid), store.prompt_path(wid)
         cmd = fill(c.cfg.agents.command, workspace=path, prompt_file=prompt_file, prompt=prompt_file.read_text())
-        ws["session"] = execute.spawn(cmd, path, c.env(ws["devices"]), store.session_log(wid))
+        # UR_SESSION keeps the session to its own workspace's commands.
+        ws["session"] = execute.spawn(cmd, path, c.env(ws["devices"], UR_SESSION=wid), store.session_log(wid))
         store.save_ws(ws)
     return ws
 
@@ -86,18 +104,23 @@ def _write_prompt(c: Campaign, wid: str, text: str) -> Path:
 
 
 def _record_hashes(path: Path, limit: float | None) -> tuple[set[bytes], bool]:
-    """Hashes of every line of every text file under path (whole-file hashes for other files)."""
-    text_suffixes = {".jsonl", ".ndjson", ".json", ".txt", ".csv", ".tsv", ".md", ".xml", ".yaml", ".yml"}
+    """Hashes of the records under path: lines of line-based text files, whole files otherwise.
+
+    CSV/TSV header lines and very short lines are skipped, since they match across splits without
+    meaning the same example.
+    """
+    line_suffixes = {".jsonl", ".ndjson", ".txt", ".csv", ".tsv"}
     files = [path] if path.is_file() else sorted(p for p in path.rglob("*") if p.is_file())
     hashes: set[bytes] = set()
     total = 0
     for f in files:
-        if f.suffix.lower() in text_suffixes:
+        if f.suffix.lower() in line_suffixes:
+            skip_header = f.suffix.lower() in (".csv", ".tsv")
             with open(f, "rb") as fh:
-                for line in fh:
+                for i, line in enumerate(fh):
                     total += len(line)
                     line = line.strip()
-                    if line:
+                    if len(line) >= 8 and not (skip_header and i == 0):
                         hashes.add(hashlib.blake2b(line, digest_size=16).digest())
                     if limit and total > limit:
                         return hashes, True
@@ -136,10 +159,11 @@ def _overlap(c: Campaign) -> tuple[bool, list[str]]:
     return ok, lines
 
 
+@_exclusive
 def check_cmd(c: Campaign) -> int:
     cfg, store = c.cfg, c.store
     s = c.load_state()
-    if (s.get("check") or {}).get("passed") and c.brief_path.exists():
+    if s["rounds"] or ((s.get("check") or {}).get("passed") and c.brief_path.exists()):
         raise UrError("Setup is complete, and `ur check` only runs during setup. To set up again, `ur archive` first.")
     errs = config_mod.problems(cfg, c.project)
     if not c.eval_dir.is_dir() or not any(c.eval_dir.iterdir()):
@@ -175,6 +199,17 @@ def check_cmd(c: Campaign) -> int:
     parallel = len(slices) if cfg.exec.devices else 1
     with ThreadPoolExecutor(max_workers=parallel) as pool:
         nodes = list(pool.map(lambda wid: do_run(c, wid), wids))
+    for node in nodes:
+        if node["status"] != "ok":
+            continue
+        after = store.snapshot(store.ws_path(node["workspace"]), c.snapshot_matcher(), cfg.workspace.max_file_mb, cfg.workspace.max_total_mb)
+        stray = [p for _, p in store.changed(node["tree"], after)]
+        if stray:
+            raise UrError(
+                "Training writes files outside run.artifacts:\n  " + "\n  ".join(stray)
+                + "\nWorkers couldn't commit after such a run. Add them to run.artifacts (outputs to keep with the "
+                "checkpoint) or workspace.exclude, then `ur check` again."
+            )
     failed = [node for node in nodes if node["status"] != "ok"]
     if failed:
         node = failed[0]
@@ -256,6 +291,7 @@ def check_cmd(c: Campaign) -> int:
     return 0
 
 
+@_exclusive
 def check_probe_cmd(c: Campaign, accept: bool) -> int:
     store = c.store
     s = c.load_state()
@@ -327,6 +363,7 @@ def _require(c: Campaign, s: dict[str, Any], phase: str, what: str) -> None:
         raise UrError(f"Can't {what} now: the campaign is in {current}. `ur status` says what's next.")
 
 
+@_exclusive
 def round_cmd(c: Campaign) -> int:
     cfg, store = c.cfg, c.store
     s = c.load_state()
@@ -391,6 +428,7 @@ def spawn_cmd(c: Campaign, wid: str) -> int:
     return 0
 
 
+@_exclusive
 def close_cmd(c: Campaign) -> int:
     cfg, store = c.cfg, c.store
     s = c.load_state()
@@ -409,13 +447,16 @@ def close_cmd(c: Campaign) -> int:
     evaluate.score_nodes(c, [n for n in nodes if c.score(n) is None], "heldout")
     base = store.load_node(rnd["base"])
     ranked = c.rank(nodes)
-    improved = [n for n in ranked if c.better(c.score(n), c.score(base))]
+    broken = {n["id"]: guards.failures(cfg.objective.guards, n["heldout"], base.get("heldout")) for n in ranked}
+    improved = [n for n in ranked if not broken[n["id"]] and c.better(c.score(n), c.score(base))]
     construct, construct_deadline = None, None
     if len(improved) >= 2:
         construct = f"r{rnd['n']}-c"
         construct_deadline = now() + cfg.round.construct_minutes * 60
         top = [n["id"] for n in improved[: cfg.round.top_m]]
-        c.create_workspace(construct, base["id"], "construct", rnd["n"], construct_deadline, top, c.device_slices()[0])
+        ws = c.create_workspace(construct, base["id"], "construct", rnd["n"], construct_deadline, top, c.device_slices()[0])
+        ws["max_candidates"] = cfg.round.max_candidates
+        store.save_ws(ws)
         _write_prompt(
             c, construct, prompts.construct(store.ws_path(construct), base["id"], top, cfg.round.max_candidates, construct_deadline)
         )
@@ -430,7 +471,10 @@ def close_cmd(c: Campaign) -> int:
         s["phase"] = "round_closed"
     print(f"Round {rnd['n']} closed. Base {base['id']}: held-out {c.metric} {fmt_num(c.score(base))}.")
     for n in ranked:
-        print(f"  {n['id']}  {heads[n['id']]:<8} held-out {fmt_num(c.score(n))}" + ("  beats the base" if n in improved else ""))
+        note = "  beats the base" if n in improved else ""
+        if broken[n["id"]]:
+            note = f"  breaks a guard: {'; '.join(broken[n['id']])}"
+        print(f"  {n['id']}  {heads[n['id']]:<8} held-out {fmt_num(c.score(n))}{note}")
     for n in nodes:
         if c.score(n) is None:
             print(f"  {n['id']}  {heads[n['id']]:<8} couldn't be scored: {n.get('errors', {}).get('heldout')}")
@@ -471,8 +515,8 @@ def _cleanup(c: Campaign, s: dict[str, Any], rnd: dict[str, Any]) -> None:
             continue
         for nid in ws.get("runs", []):
             if nid not in keep:
-                shutil.rmtree(store.artifacts_dir(nid), ignore_errors=True)
-        shutil.rmtree(store.ws_path(wid), ignore_errors=True)
+                force_rmtree(store.artifacts_dir(nid))
+        force_rmtree(store.ws_path(wid))
 
 
 def _gpu_hours(c: Campaign, rnd: dict[str, Any]) -> float:
@@ -489,6 +533,7 @@ def _gpu_hours(c: Campaign, rnd: dict[str, Any]) -> float:
     return total / 3600
 
 
+@_exclusive
 def select_cmd(c: Campaign) -> int:
     cfg, store = c.cfg, c.store
     s = c.load_state()
@@ -503,7 +548,8 @@ def select_cmd(c: Campaign) -> int:
         pool[item["node"]] = store.load_node(item["node"])
     candidates = []
     if rnd.get("construct"):
-        candidates = [nid for nid in store.load_ws(rnd["construct"])["candidates"] if store.load_node(nid)["status"] == "ok"]
+        submitted = store.load_ws(rnd["construct"])["candidates"][: cfg.round.max_candidates]
+        candidates = [nid for nid in submitted if store.load_node(nid)["status"] == "ok"]
         for nid in candidates:
             pool[nid] = store.load_node(nid)
     unscored = [n for n in pool.values() if c.score(n) is None and not (n.get("errors") or {}).get("heldout")]
@@ -533,6 +579,7 @@ def select_cmd(c: Campaign) -> int:
         evaluate.score_nodes(c, [new_base], "final")
         new_base = store.load_node(new_base["id"])
     hours = _gpu_hours(c, rnd)
+    ran = any(store.load_ws(wid).get("runs") for wid in rnd["workers"])
     with c.update_state() as s:
         r = s["rounds"][-1]
         r.update(
@@ -546,7 +593,11 @@ def select_cmd(c: Campaign) -> int:
             finished=now(),
         )
         s["base"] = new_base["id"]
-        s["stalls"] = 0 if improved else s["stalls"] + 1
+        if improved:
+            s["stalls"] = 0
+        elif ran:
+            s["stalls"] += 1
+        s["empty_rounds"] = 0 if ran else s.get("empty_rounds", 0) + 1
         s["gpu_hours"] += hours
         reason = c.stop_reason(s)
         s["phase"] = "stopped" if reason else "idle"
@@ -555,6 +606,11 @@ def select_cmd(c: Campaign) -> int:
     _cleanup(c, s, rnd)
     for nid, why in rejected:
         print(f"  {nid} broke a guard: {'; '.join(why)}")
+    if not ran:
+        print(
+            f"No worker ran anything this round, so it doesn't count toward stop.patience. "
+            f"Check the session logs in {store.root / 'sessions'}."
+        )
     if improved:
         line = f"Round {rnd['n']}: base {base['id']} ({fmt_num(c.score(base))}) -> {new_base['id']} ({fmt_num(c.score(new_base))})"
         if new_base.get("final"):
@@ -570,7 +626,7 @@ def select_cmd(c: Campaign) -> int:
 def wait_cmd(c: Campaign, timeout: float | None) -> int:
     from .status import ready
 
-    end = now() + timeout if timeout else None
+    end = now() + timeout if timeout is not None else None
     while True:
         done, why = ready(c)
         if done:
@@ -640,10 +696,12 @@ def export_cmd(c: Campaign, ref: str, dest: Path) -> int:
     artifacts = c.store.artifacts_dir(nid)
     if artifacts.exists():
         shutil.copytree(artifacts, dest, dirs_exist_ok=True)
+        make_writable(dest)
     print(f"Exported {nid} (code{' and checkpoints' if artifacts.exists() else ''}) to {dest}.")
     return 0
 
 
+@_exclusive
 def archive_cmd(c: Campaign) -> int:
     store = c.store
     for ws in store.all_ws():

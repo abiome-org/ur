@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import os
 from pathlib import Path
 from typing import Any, Iterator
@@ -63,12 +64,36 @@ class Campaign:
             "round": 0,
             "rounds": [],
             "stalls": 0,
+            "empty_rounds": 0,
             "gpu_hours": 0.0,
             "stopped_reason": None,
         }
         for key, value in defaults.items():
             s.setdefault(key, value)
         return s
+
+    @contextlib.contextmanager
+    def exclusive(self) -> Iterator[None]:
+        """Held by commands that move the campaign between phases, so two can't overlap."""
+        path = self.ur / "state" / "busy.lock"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a+") as f:
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                f.seek(0)
+                holder = f.read().strip()
+                raise UrError(f"Another ur command is changing the campaign right now{f' ({holder})' if holder else ''}. Try again when it's done.") from None
+            f.seek(0)
+            f.truncate()
+            f.write(f"pid {os.getpid()}")
+            f.flush()
+            try:
+                yield
+            finally:
+                f.seek(0)
+                f.truncate()
+                fcntl.flock(f, fcntl.LOCK_UN)
 
     @contextlib.contextmanager
     def update_state(self) -> Iterator[dict[str, Any]]:
@@ -93,10 +118,12 @@ class Campaign:
 
     def stop_reason(self, s: dict[str, Any]) -> str | None:
         st = self.cfg.stop
+        if s.get("empty_rounds", 0) >= 2:
+            return "no worker ran anything in 2 rounds in a row; check agents.command and the session logs"
         if st.patience and s["stalls"] >= st.patience:
             return f"no new base in {s['stalls']} round{'s' if s['stalls'] != 1 else ''}"
         if st.max_rounds and s["round"] >= st.max_rounds:
-            return f"reached {st.max_rounds} rounds"
+            return f"reached {st.max_rounds} round{'s' if st.max_rounds != 1 else ''}"
         if st.max_gpu_hours and s["gpu_hours"] >= st.max_gpu_hours:
             return f"used {s['gpu_hours']:.1f} of {st.max_gpu_hours:g} GPU-hours"
         return None
@@ -123,7 +150,7 @@ class Campaign:
     # Matching.
 
     def snapshot_matcher(self) -> PathMatcher:
-        patterns = [".git", "/.ur", "/" + MARKER, *self.cfg.workspace.exclude]
+        patterns = [".git", "/.ur", "/" + MARKER, "__pycache__/", "*.pyc", *self.cfg.workspace.exclude]
         patterns += ["/" + a.strip("/") for a in self.cfg.run.artifacts]
         patterns += ["/" + s.strip("/") for s in self.cfg.workspace.shared]
         return PathMatcher(patterns)
@@ -183,24 +210,37 @@ class Campaign:
 
     # Workspaces.
 
+    def init_dir(self, nid: str | None) -> Path | None:
+        """What {init} points at for a run warm-started from nid: its stored checkpoint, if it has one."""
+        if not nid:
+            return None
+        root = self.store.artifacts_dir(nid)
+        artifacts = self.cfg.run.artifacts
+        path = root / artifacts[0] if len(artifacts) == 1 else root
+        return path if path.exists() else None
+
+    @staticmethod
+    def _link(dest: Path, rel: str, target: Path) -> None:
+        link = dest / rel
+        if not config_mod.inside(link.parent, dest) or link.resolve(strict=False) == dest.resolve():
+            raise UrError(f"{rel!r} isn't a path inside the workspace.")
+        if link.exists() or link.is_symlink():
+            remove_path(link)
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(target)
+
     def link_artifacts(self, nid: str, dest: Path) -> None:
-        """Link a node's checkpoints into dest at their usual paths."""
+        """Link a node's (read-only) checkpoints into dest at their usual paths."""
         for rel in self.cfg.run.artifacts:
             src = self.store.artifacts_dir(nid) / rel
-            link = dest / rel
-            if link.exists() or link.is_symlink():
-                remove_path(link)
             if src.exists():
-                link.parent.mkdir(parents=True, exist_ok=True)
-                link.symlink_to(src)
+                self._link(dest, rel, src)
+            elif (dest / rel).is_symlink():
+                (dest / rel).unlink()
 
     def link_shared(self, dest: Path) -> None:
         for rel in self.cfg.workspace.shared:
-            link = dest / rel
-            if link.exists() or link.is_symlink():
-                remove_path(link)
-            link.parent.mkdir(parents=True, exist_ok=True)
-            link.symlink_to((self.project / rel).resolve())
+            self._link(dest, rel, (self.project / rel).resolve())
 
     def create_workspace(
         self,

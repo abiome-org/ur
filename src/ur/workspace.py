@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from . import evaluate, execute
-from .util import UrError, clock, fill, fmt_num, human_duration, now, remove_path
+from .util import UrError, clock, fill, fmt_num, human_duration, make_read_only, now, remove_path
 
 if TYPE_CHECKING:
     from .campaign import Campaign
@@ -41,6 +41,28 @@ def resolve_ref(c: "Campaign", ws: dict[str, Any], ref: str) -> str:
 # Training runs.
 
 
+def clear_stale_run(c: "Campaign", ws: dict[str, Any]) -> None:
+    """If the last `ur run` here died without cleaning up, stop its training and mark its node failed."""
+    active = ws.get("active")
+    if not active or execute.alive(active):
+        return
+    if execute.alive(active.get("train")):
+        execute.kill_group(active["train"]["pid"])
+    try:
+        node = c.store.load_node(active["node"])
+    except UrError:
+        node = None
+    if node and node["status"] == "running":
+        node.update(status="failed", error="the `ur run` that started it died")
+        c.store.save_node(node)
+    ws["active"] = None
+
+
+def _require_idle(ws: dict[str, Any]) -> None:
+    if execute.alive(ws.get("active")):
+        raise UrError(f"A run is going in this workspace ({ws['active'].get('node')}). Wait for it to finish.")
+
+
 def do_run(c: "Campaign", wid: str) -> dict[str, Any]:
     """Snapshot the workspace, train under the budget, collect the checkpoint and score it on dev."""
     store, cfg = c.store, c.cfg
@@ -49,8 +71,8 @@ def do_run(c: "Campaign", wid: str) -> dict[str, Any]:
         ws = store.load_ws(wid)
         if ws["closed"]:
             raise UrError("This workspace's round is closed, so nothing more counts here.")
-        if execute.alive(ws.get("active")):
-            raise UrError(f"A run is already going in this workspace ({ws['active'].get('node')}).")
+        _require_idle(ws)
+        clear_stale_run(c, ws)
         budget = ws.get("budget") or cfg.run.budget
         limit = c.run_timeout(budget)
         if ws.get("deadline") and now() + limit > ws["deadline"]:
@@ -67,7 +89,7 @@ def do_run(c: "Campaign", wid: str) -> dict[str, Any]:
             raise UrError(
                 "These changes are outside the editable paths (" + ", ".join(cfg.workspace.editable) + "):\n  "
                 + "\n  ".join(outside)
-                + "\nUndo them (`ur reset` restores your last commit), then run again."
+                + "\nUndo them (delete new files; `ur reset` restores your last commit), then run again."
             )
         head = store.load_node(ws["head"])
         commit = head["commit"] if tree == head["tree"] else store.commit(tree, head["commit"], wid)
@@ -118,9 +140,10 @@ def _train(c: "Campaign", ws: dict[str, Any], node: dict[str, Any], budget: floa
     path = store.ws_path(ws["id"])
     for rel in cfg.run.artifacts:
         remove_path(path / rel)
-    init_dir = ""
-    if node["init_from"] and store.artifacts_dir(node["init_from"]).exists():
-        init_dir = str(store.artifacts_dir(node["init_from"]))
+    init = c.init_dir(node["init_from"])
+    init_dir = str(init) if init else ""
+    if node["init_from"] and not init:
+        node["note"] = f"{node['init_from']} has no checkpoint, so this run trained from scratch"
     env = c.env(ws["devices"], UR_BUDGET=fmt_budget(budget), UR_INIT=init_dir, UR_RUN_ID=node["id"], UR_WORKSPACE=path)
     cmd = fill(cfg.run.command, budget=fmt_budget(budget), init=init_dir, workspace=path)
     log = store.node_dir(node["id"]) / "train.log"
@@ -129,7 +152,7 @@ def _train(c: "Campaign", ws: dict[str, Any], node: dict[str, Any], budget: floa
         with store.ws_lock(ws["id"]):
             meta = store.load_ws(ws["id"])
             if meta.get("active"):
-                meta["active"]["train_pgid"] = pid
+                meta["active"]["train"] = execute.identity(pid)
                 store.save_ws(meta)
 
     status, code, seconds = "failed", None, 0.0
@@ -167,6 +190,7 @@ def _collect_artifacts(c: "Campaign", path: Path, nid: str) -> None:
         dst = c.store.artifacts_dir(nid) / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(src), str(dst))
+        make_read_only(dst)
         src.symlink_to(dst)
 
 
@@ -184,6 +208,8 @@ def run_cmd(c: "Campaign", wid: str) -> int:
     base = c.store.load_node(ws["base"])
     head = c.store.load_node(ws["head"])
     print(f"{node['id']}: dev {metrics_text(c, node['dev'])}, trained {human_duration(node['seconds'])}.")
+    if node.get("note"):
+        print(f"  Note: {node['note']}.")
     compare = f"base {base['id']}: {fmt_num(c.dev_score(base))}"
     if head["id"] != base["id"]:
         compare += f", your last commit {head['id']}: {fmt_num(c.dev_score(head))}"
@@ -210,7 +236,14 @@ def commit_cmd(c: "Campaign", wid: str, candidate: bool) -> int:
             raise UrError(f"Your last run ({last}) failed, so there's nothing to commit. Fix it and `ur run` again.")
         tree = store.snapshot(store.ws_path(wid), c.snapshot_matcher(), cfg.workspace.max_file_mb, cfg.workspace.max_total_mb)
         if tree != node["tree"]:
-            raise UrError(f"The workspace changed since your last run ({last}). `ur run` again, then commit.")
+            changed = [p for _, p in store.changed(node["tree"], tree)]
+            raise UrError(
+                f"The workspace changed since your last run ({last}):\n  " + "\n  ".join(changed)
+                + "\nIf you changed them, `ur run` again, then commit. If training wrote them, delete them and commit."
+            )
+        limit = ws.get("max_candidates")
+        if candidate and last not in ws["candidates"] and limit and len(ws["candidates"]) >= limit:
+            raise UrError(f"You've already submitted {limit} candidate{'s' if limit != 1 else ''}, the most this round takes.")
         ws["head"] = last
         if candidate and last not in ws["candidates"]:
             ws["candidates"].append(last)
@@ -223,6 +256,7 @@ def commit_cmd(c: "Campaign", wid: str, candidate: bool) -> int:
 def reset_cmd(c: "Campaign", wid: str, ref: str | None) -> int:
     store = c.store
     ws = store.load_ws(wid)
+    _require_idle(ws)
     nid = resolve_ref(c, ws, ref or "head")
     node = store.load_node(nid)
     path = store.ws_path(wid)
@@ -295,6 +329,7 @@ def apply_cmd(c: "Campaign", wid: str, ref: str) -> int:
     ws = store.load_ws(wid)
     if ws["closed"]:
         raise UrError("This workspace's round is closed, so nothing more counts here.")
+    _require_idle(ws)
     nid = resolve_ref(c, ws, ref)
     base_commit = store.load_node(ws["base"])["commit"]
     their_commit = store.load_node(nid)["commit"]

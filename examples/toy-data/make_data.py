@@ -1,7 +1,8 @@
-"""Make the toy dataset: y = 1.5x^2 - x + 0.3 sin(4x) + noise, for x in [-1, 1].
+"""Make the toy project's data: y = 1.5x^2 - x + 0.3 sin(4x) + noise, for x in [-1, 1].
 
-train and dev go in data/, where workers can read them. heldout and final go to
---private, which should be outside the project.
+This lives outside the toy project on purpose: a worker that can read the formula
+doesn't need to learn it. train and dev go to <project>/data, where workers can read
+them; heldout and final go to --private, which should be outside the project too.
 """
 
 import argparse
@@ -29,13 +30,13 @@ def write(path, data):
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--project", required=True, help="the toy project; train and dev go in its data/")
     parser.add_argument("--private", required=True, help="where heldout and final go; keep it outside the project")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
     rng = random.Random(args.seed)
-    here = os.path.dirname(os.path.abspath(__file__))
-    write(os.path.join(here, "data", "train.jsonl"), rows(2000, rng))
-    write(os.path.join(here, "data", "dev.jsonl"), rows(500, rng))
+    write(os.path.join(args.project, "data", "train.jsonl"), rows(2000, rng))
+    write(os.path.join(args.project, "data", "dev.jsonl"), rows(500, rng))
     write(os.path.join(args.private, "heldout.jsonl"), rows(500, rng))
     write(os.path.join(args.private, "final.jsonl"), rows(500, rng))
 

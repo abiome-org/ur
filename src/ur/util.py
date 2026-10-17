@@ -107,7 +107,48 @@ def remove_path(path: Path) -> None:
     if path.is_symlink() or path.is_file():
         path.unlink()
     elif path.is_dir():
-        shutil.rmtree(path)
+        force_rmtree(path)
+
+
+def make_read_only(path: Path) -> None:
+    """Drop write permission on everything under path (links are left alone)."""
+    if path.is_symlink() or not path.exists():
+        return
+    if path.is_file():
+        path.chmod(path.stat().st_mode & ~0o222)
+        return
+    for dirpath, _, filenames in os.walk(path, topdown=False):
+        for name in filenames:
+            p = os.path.join(dirpath, name)
+            if not os.path.islink(p):
+                os.chmod(p, os.stat(p).st_mode & ~0o222)
+        os.chmod(dirpath, os.stat(dirpath).st_mode & ~0o222)
+
+
+def make_writable(path: Path) -> None:
+    if path.is_symlink() or not path.exists():
+        return
+    if path.is_file():
+        path.chmod(path.stat().st_mode | 0o200)
+        return
+    for dirpath, _, filenames in os.walk(path):
+        os.chmod(dirpath, os.stat(dirpath).st_mode | 0o700)
+        for name in filenames:
+            p = os.path.join(dirpath, name)
+            if not os.path.islink(p):
+                os.chmod(p, os.stat(p).st_mode | 0o200)
+
+
+def force_rmtree(path: Path) -> None:
+    """rmtree that also removes read-only trees."""
+    if not path.exists() or path.is_symlink():
+        if path.is_symlink():
+            path.unlink()
+        return
+    for dirpath, _, _ in os.walk(path):
+        with contextlib.suppress(OSError):
+            os.chmod(dirpath, os.stat(dirpath).st_mode | 0o700)
+    shutil.rmtree(path, ignore_errors=True)
 
 
 _PLACEHOLDER = re.compile(r"\{([a-z_]+)\}")

@@ -91,8 +91,8 @@ def load(project: Path) -> Section:
     except tomllib.TOMLDecodeError as e:
         raise UrError(f"{path}: {e}") from None
     cfg = _merge(DEFAULTS, data)
-    if not cfg.store.root:
-        cfg.store["root"] = str(default_store_root(project))
+    root = resolve(project, cfg.store.root) if cfg.store.root else default_store_root(project)
+    cfg.store["root"] = str(root.resolve())
     cfg.exec["devices"] = [str(d) for d in cfg.exec.devices]
     return cfg
 
@@ -171,11 +171,16 @@ def problems(cfg: Section, project: Path) -> list[str]:
     if r.init != "scratch" and not r.artifacts:
         errs.append("run.init needs run.artifacts: the checkpoint a run starts from.")
 
+    if inside(Path(cfg.store.root), project):
+        errs.append(f"store.root ({cfg.store.root}) is inside the project. Put it outside, where workspaces can live.")
+
     w = cfg.workspace
     if not w.editable:
         errs.append('workspace.editable is empty, so workers could change nothing. Use ["**"] for everything.')
     for rel in w.shared:
-        if not (project / rel).exists():
+        if Path(rel).is_absolute() or ".." in Path(rel).parts:
+            errs.append(f"workspace.shared: {rel!r} must be a path inside the project.")
+        elif not (project / rel).exists():
             errs.append(f"workspace.shared: {project / rel} doesn't exist.")
 
     rd = cfg.round
@@ -231,8 +236,9 @@ def warnings(cfg: Section, project: Path) -> list[str]:
         out.append("check.baseline_runs is 1, so ur can't measure noise or break near-ties.")
     if not cfg.exec.wrap:
         out.append(
-            "exec.wrap is empty, so worker processes can read anything this user can, held-out data included. "
-            "A sandbox wrapper closes that."
+            "exec.wrap is empty, so training and scoring can read anything this user can, held-out data included. "
+            "A sandbox wrapper closes that. Agent sessions aren't wrapped by it, so sandbox them through "
+            "agents.command too."
         )
     return out
 
@@ -274,7 +280,8 @@ def gitignore_patterns(project: Path) -> list[str]:
 TEMPLATE = """\
 # Ur campaign config for {name}.
 # `ur init` wrote this. Finish it with the user, then run `ur check`.
-# Relative paths are relative to the project.
+# Relative paths are relative to the project. Commands run in a shell, and ur fills
+# their {{placeholders}} shell-quoted, so don't add quotes around them.
 # Once setup is done, [objective], [splits], [eval] and [run] are frozen:
 # changing them starts a new campaign (`ur archive`).
 
@@ -298,18 +305,21 @@ timeout = 3600          # seconds
 
 [run]
 # Training. It runs in the workspace and must leave its outputs under `artifacts`.
-# Placeholders: {{budget}} {{init}} (a checkpoint directory to start from, or empty) {{workspace}}
+# Placeholders: {{budget}} {{workspace}} {{init}}: the checkpoint to start from, or empty. With one artifact
+# path, {{init}} is its stored copy (e.g. ckpt/); with several, a directory holding them all at their usual paths.
+# Stored checkpoints are read-only.
 command = ""
 budget = 300            # per run, in `unit`
-unit = "seconds"        # ur enforces seconds itself. For any other unit the command must, and `timeout` is required
-timeout = 0             # hard wall-clock limit per run in seconds; 0 means budget + 10% (at least 30s)
+unit = "seconds"        # the command should stop itself at {{budget}}; ur stops it at `timeout`. Other units need `timeout`
+timeout = 0             # hard wall-clock limit per run in seconds; 0 means budget + 10% (at least 30s more)
 artifacts = []          # output paths, e.g. ["ckpt"]. Moved into ur's store after each run
 init = "scratch"        # what {{init}} is: "scratch" (empty), "base" (the round's base checkpoint) or "parent" (the workspace's last commit)
 
 [workspace]
 editable = ["**"]       # globs workers may change. ur refuses runs that touch anything else
 exclude = {exclude}  # left out of code snapshots, like .gitignore
-shared = []             # read-only paths linked into each workspace instead of copied, e.g. ["data"]
+shared = []             # paths linked into each workspace instead of copied, e.g. ["data"]. Make them read-only:
+                        # workers could write through the links
 max_file_mb = 50        # a bigger file in a snapshot is an error
 max_total_mb = 500      # so is a bigger snapshot
 
@@ -351,7 +361,8 @@ overlap = "builtin"     # "builtin", "off", or a command (placeholders {{train}}
 overlap_max_mb = 2000   # how much of train and dev the built-in check reads
 max_overlap = 0         # records train or dev may share with heldout or final
 
-# Expected scores, to catch a broken scorer. Each workspace is a directory scored as is.
+# Expected scores, to catch a broken scorer. Each workspace is a directory scored as is,
+# and its metric must be at least `min` and at most `max` (give either or both).
 # [[check.expect]]
 # name = "constant predictor"
 # workspace = ".ur/checks/constant"

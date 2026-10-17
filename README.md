@@ -56,7 +56,7 @@ The heavy files (code snapshots, runs, checkpoints, workspaces) live in a store 
 
 ## Contracts
 
-**Training.** `run.command` runs inside a workspace with `{budget}` (and `{init}`, a checkpoint directory, when `run.init` warm-starts). Its outputs go under `run.artifacts`. ur moves them into the store after each run. With `run.unit = "seconds"` ur enforces the budget itself.
+**Training.** `run.command` runs inside a workspace with `{budget}`. When `run.init` warm-starts, it also gets `{init}`, the stored checkpoint to start from. Its outputs go under `run.artifacts`. After each run ur moves them into the store and makes them read-only. The command should stop itself at `{budget}`. ur stops it at `run.timeout`, which defaults to the budget plus 10% (at least 30 s) to leave time for saving. Files that training writes anywhere else make a run uncommittable, and `ur check` reports them.
 
 **Scoring.** `eval.command` runs in a disposable copy of a candidate's workspace, with its checkpoints linked in. It gets `{eval_dir}`, `{workspace}`, `{data}`, `{split}` and `{out}`, and must write a JSON object of numbers to `{out}`. Workers see their scores on dev. Only ur scores held-out, and those scores never reach a worker. The final split is never used for selection: it reports the result, and shows when selection has started to overfit held-out.
 
@@ -95,11 +95,13 @@ ur enforces these:
 - **Sealed scorer and settings.** The scorer, the brief, and the `[objective]`, `[splits]`, `[eval]` and `[run]` settings are sealed. Change any of them and ur refuses to continue until you start a new campaign.
 - **Editable paths.** A run that touches anything outside `workspace.editable` is refused.
 - **Scores tied to exact code.** A commit has to match the exact code of the run it keeps, so every score belongs to a specific snapshot.
+- **Read-only checkpoints.** Stored checkpoints can't be changed through the links workspaces get.
 - **Clean scoring.** Scoring always happens in a throwaway copy.
-- **Hidden held-out scores.** No command run from a workspace shows them.
+- **One phase change at a time.** Commands that move the campaign between phases take turns, so overlapping "continue"s can't corrupt it.
+- **Hidden held-out scores.** Workspace commands never show them or a sibling's nodes. Sessions that ur starts can only run their own workspace's commands; from inside a workspace, so can everything else, including `ur -C`.
 - **Isolation by default.** Held-out data stays outside the project, and workspaces don't contain `.ur/`.
 
-ur can't keep a determined process from reading files this user can read. Without a sandbox, a worker that goes looking can find the held-out data. `exec.wrap` puts every training and scoring command inside a wrapper you choose, such as a container with no network that can only see the workspace. Use one for anything that matters. The cheat probe exists to find these holes before a campaign starts.
+ur can't keep a determined process from reading files this user can read. Without a sandbox, a worker that goes looking can find the held-out data, and code the scorer imports runs with the scorer's access to it. `exec.wrap` puts every training and scoring command inside a wrapper you choose, such as a container with no network that can only see the workspace. Agent sessions need the same treatment through `agents.command`. Use both for anything that matters. The cheat probe exists to find these holes before a campaign starts. Check what the project itself reveals, too: a worker that can read how the data was generated doesn't have to learn it.
 
 ## Development
 
