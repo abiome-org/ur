@@ -1,0 +1,49 @@
+[objective]
+metric = "mse"
+direction = "min"
+guards = ["params <= 4"]
+
+[splits]
+train = "data/train.jsonl"
+dev = "data/dev.jsonl"
+heldout = "@PRIVATE@/heldout.jsonl"
+final = "@PRIVATE@/final.jsonl"
+
+[eval]
+command = "@PYTHON@ {eval_dir}/score.py --workspace {workspace} --data {data} --out {out}"
+timeout = 60
+
+[run]
+command = "@PYTHON@ train.py --budget {budget} --init {init}"
+budget = 0.5
+artifacts = ["ckpt"]
+init = "scratch"
+
+[workspace]
+editable = ["model.py", "train.py"]
+exclude = ["__pycache__/", "*.pyc"]
+shared = ["data"]
+
+[round]
+workers = 2
+minutes = 3
+construct_minutes = 3
+
+[stop]
+patience = 1
+
+[agents]
+spawn = "command"
+command = "@PYTHON@ @AGENT@ {prompt_file}"
+
+[check]
+probe_minutes = 3
+
+[[check.expect]]
+name = "mean predictor"
+workspace = ".ur/checks/mean"
+metric = "mse"
+min = 0.2
+
+[store]
+root = "@STORE@"
