@@ -206,3 +206,20 @@ def test_overlap_ignores_headers_and_short_lines(tmp_path):
     a.write_text("x,y,label\n0.123456,1.5,cat\n{\n")
     b.write_text("x,y,label\n0.654321,2.5,dog\n{\n")
     assert not (_record_hashes(a, None)[0] & _record_hashes(b, None)[0])
+
+
+def test_a_worker_cant_fill_in_its_own_heldout_score(tmp_path, ur):
+    project = ready_project(tmp_path, ur)
+    ur("round", cwd=project)
+    ws = tmp_path / "store" / "ws" / "r1-w1"
+    (ws / "score.txt").write_text("2\n")
+    ur("run", cwd=ws)
+    ur("commit", cwd=ws)
+    head = json.loads((tmp_path / "store" / "meta" / "r1-w1.json").read_text())["head"]
+    record = tmp_path / "store" / "runs" / head / "run.json"
+    node = json.loads(record.read_text())
+    node["heldout"], node["heldout_repeats"] = {"score": 1e9, "params": 1}, [1e9]
+    record.write_text(json.dumps(node))
+    ur("close", cwd=project)
+    s = json.loads((project / ".ur" / "state" / "campaign.json").read_text())
+    assert s["rounds"][0]["ranking"][0]["score"] < 10

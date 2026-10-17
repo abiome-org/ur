@@ -308,8 +308,8 @@ def check_probe_cmd(c: Campaign, accept: bool) -> int:
         verdict, detail = "passed", "The probe didn't commit anything."
     else:
         node = store.load_node(head)
-        if c.score(node) is None:
-            evaluate.score_nodes(c, [node], "heldout")
+        node["heldout"], node["heldout_repeats"] = None, []
+        evaluate.score_nodes(c, [node], "heldout")
         score = c.score(node)
         margin = max(3 * noise, 1e-9 * max(1.0, abs(mean)))
         bar = mean + margin if c.cfg.objective.direction == "max" else mean - margin
@@ -444,7 +444,11 @@ def close_cmd(c: Campaign) -> int:
             heads[ws["head"]] = wid
     nodes = [store.load_node(nid) for nid in heads]
     print(f"Scoring {len(nodes)} committed worker{'s' if len(nodes) != 1 else ''} on held-out ...", flush=True)
-    evaluate.score_nodes(c, [n for n in nodes if c.score(n) is None], "heldout")
+    # Always score here, whatever a node's record already says: workers can write to their own records.
+    for n in nodes:
+        n["heldout"], n["heldout_repeats"] = None, []
+        n.get("errors", {}).pop("heldout", None)
+    evaluate.score_nodes(c, nodes, "heldout")
     base = store.load_node(rnd["base"])
     ranked = c.rank(nodes)
     broken = {n["id"]: guards.failures(cfg.objective.guards, n["heldout"], base.get("heldout")) for n in ranked}
@@ -552,6 +556,9 @@ def select_cmd(c: Campaign) -> int:
         candidates = [nid for nid in submitted if store.load_node(nid)["status"] == "ok"]
         for nid in candidates:
             pool[nid] = store.load_node(nid)
+    for nid in candidates:  # scored here, never taken from their records
+        pool[nid]["heldout"], pool[nid]["heldout_repeats"] = None, []
+        pool[nid].get("errors", {}).pop("heldout", None)
     unscored = [n for n in pool.values() if c.score(n) is None and not (n.get("errors") or {}).get("heldout")]
     if unscored:
         print(f"Scoring {len(unscored)} candidate{'s' if len(unscored) != 1 else ''} on held-out ...", flush=True)
